@@ -1,8 +1,8 @@
-# 红薯雷达：Windows 桌面软件完整开发提示词
+# 红薯雷达：macOS、Windows、Web 跨平台软件完整开发提示词
 
-请直接为我开发并交付一套完整可运行、可打包、可分发的 Windows 桌面软件。不要只输出产品方案、界面示例、伪代码或零散片段；请创建完整项目文件，运行调试，修复错误，并在环境允许时打包出双击即可运行的 EXE。
+请直接为我开发并交付一套完整可运行、可打包、可分发的跨平台软件，同时支持 macOS、Windows 和 Web。不要只输出产品方案、界面示例、伪代码或零散片段；请创建完整项目文件，运行调试，修复错误，并在当前环境允许时产出对应平台安装包或可部署的 Web 构建。
 
-**软件定位：** 监控用户主动添加的小红书公开商品，定时记录商品累计已售、价格、店铺等公开信息，通过相邻快照计算商品和店铺的小时销量、今日销量、昨日销量与历史趋势。所有业务数据保存在本机 SQLite 数据库中。
+**软件定位：** 监控用户主动添加的小红书公开商品，定时记录商品累计已售、价格、店铺等公开信息，通过相邻快照计算商品和店铺的小时销量、今日销量、昨日销量与历史趋势。桌面版将业务数据保存在当前用户的数据目录；Web 版将数据保存在运行服务的主机或持久化数据卷中的 SQLite 数据库。
 
 > **执行要求：** 请严格按照下面的规格一次性完成。
 
@@ -10,32 +10,38 @@
 
 **交付内容至少包括：**
 
-1. 完整 Python 源码。
+1. 可复用的完整 Python 业务内核源码，桌面端与 Web 端不得复制两套采集、统计和数据库逻辑。
 2. SQLite 数据库初始化与自动迁移代码。
-3. Windows 桌面图形界面。
-4. 定时采集与三级采集兜底逻辑。
-5. 企业微信机器人通知。
-6. 只读 MCP 数据服务。
-7. `requirements.txt`。
-8. `README.md`。
-9. 一键打包脚本 `build.bat`。
-10. PyInstaller `.spec` 文件。
-11. 最终无控制台黑框的单文件 EXE。
+3. 同时支持 macOS 与 Windows 的桌面图形界面。
+4. 响应式 Web 图形界面与 FastAPI 服务端。
+5. 定时采集与三级采集兜底逻辑。
+6. 企业微信机器人通知。
+7. 只读 MCP 数据服务。
+8. `requirements.txt`，以及 Web 前端存在独立依赖时的 `package.json` 与锁文件。
+9. `README.md`，分别说明 macOS、Windows、Web 的开发、运行、构建和部署方法。
+10. Windows 构建脚本 `build-windows.bat`、macOS 构建脚本 `build-macos.sh`、Web 启动/构建脚本。
+11. PyInstaller `.spec` 文件和 CI 构建工作流。
+12. Windows 无控制台窗口的 EXE、macOS `.app`（可选 DMG）和可部署 Web 产物。
 
 代码必须是可维护的正式实现，不要把全部功能堆在一个巨大函数里。建议将界面、数据库、采集、统计、通知、MCP拆分成独立模块；如果为了便于分发选择少量文件，也必须通过类和函数清晰分层。
 
-## 二、技术栈
+## 二、跨平台架构与技术栈
 
 - Python 3.11 或 3.12。
-- GUI：Tkinter + ttk，禁止依赖需要单独安装运行环境的前端框架。
+- 架构：`core` 共享业务层 + `desktop` 桌面适配层 + `server` Web/API 适配层 + `web` 浏览器界面。采集、数据库、统计、调度、通知和配置校验必须放在共享层。
+- 桌面 GUI：PySide6（Qt Widgets），同一套界面源码支持 macOS 和 Windows；禁止在业务层直接调用平台专属 API。
+- Web 服务端：FastAPI + Uvicorn，提供 REST API；需要实时刷新时使用 WebSocket 或服务端事件。API 使用 Pydantic 模型并生成 OpenAPI 文档。
+- Web 前端：React + TypeScript + Vite（若项目环境不适合 Node，可改用 FastAPI 模板，但功能和响应式体验不能减少）。桌面端和 Web 端视觉结构、字段口径与操作语义保持一致，不要求像素级一致。
 - 数据库：SQLite，开启 WAL 模式，所有表都要自动创建，旧数据库缺少字段时自动迁移。
-- HTTP：标准库 `urllib.request`，可使用系统 `curl.exe` 作为补充请求方式。
-- 浏览器兜底：Playwright。优先使用系统 Chrome，其次 Microsoft Edge，最后使用 Playwright Chromium。
+- HTTP：httpx；所有请求统一超时、重试、代理和 User-Agent 配置，不依赖 `curl.exe` 或其他平台专属命令。
+- 浏览器兜底：Playwright。Windows 优先 Chrome，其次 Edge，最后 Playwright Chromium；macOS 优先 Chrome，其次 Playwright Chromium。浏览器选择封装为平台适配器。
 - 图片：Pillow，用于商品主图缩放与展示。
-- 打包：PyInstaller，`--onefile --windowed`，运行时不得出现命令行黑框。
+- 桌面打包：PyInstaller。Windows 使用 `--windowed` 生成 EXE；macOS 生成 `.app`，可进一步制作 DMG。PyInstaller 不是交叉编译器，必须分别在 Windows 和 macOS 构建并测试。
+- Web 部署：前端生成静态构建，FastAPI 托管 API 与前端资源；同时提供 Dockerfile 和 `.env.example`。生产部署必须说明 HTTPS、反向代理、进程重启、数据卷和备份。
 - 时间口径：全部使用 `Asia/Shanghai`。
-- 软件首次运行自动在 EXE 同目录生成 `monitor.db` 和必要的数据目录。
-- 所有外部进程在 Windows 下都要使用 `CREATE_NO_WINDOW` 或等价配置，避免采集时反复闪现黑色命令窗口。
+- 数据目录使用平台规范的用户数据目录，不写入只读安装目录：Windows 使用 `%LOCALAPPDATA%/RedPotatoRadar`，macOS 使用 `~/Library/Application Support/RedPotatoRadar`；允许通过环境变量覆盖。Web 版使用服务端可配置数据目录/持久化数据卷。
+- Web 浏览器不得直接访问 SQLite、Cookie、浏览器 Profile 或本机文件；所有访问均经服务端 API。默认仅监听 `127.0.0.1`，若允许局域网或公网访问，必须启用身份认证、CSRF/CORS 限制和 HTTPS 部署说明。
+- 启动外部进程必须使用统一封装：Windows 使用 `CREATE_NO_WINDOW` 或等价配置避免黑框；macOS 不传 Windows 专属标志，并正确处理 `.app` 生命周期与进程清理。
 
 ## 三、商品输入和解析
 
@@ -111,7 +117,7 @@ https://mall.xiaohongshu.com/api/store/jpd/edith/detail/h5/toc?version=0.0.5&ite
 - 默认逐个商品处理，不要一次打开多个页面。
 - 临时 Profile 使用完后安全清理。
 
-浏览器不可用时，要明确提示用户安装最新版 Chrome 或 Microsoft Edge，不能直接崩溃。
+浏览器不可用时，要按当前平台明确提示用户安装最新版 Chrome，Windows 也可提示 Microsoft Edge；不能直接崩溃。
 
 请求之间默认随机等待0.1～0.3秒，并允许在设置页修改为0.1～60秒。使用随机区间而不是固定值。
 
@@ -156,7 +162,7 @@ https://mall.xiaohongshu.com/api/store/jpd/edith/detail/h5/toc?version=0.0.5&ite
 - 每轮采集使用该轮整点作为统计归属时间。
 - 如果21:00轮次尚未完成，时间已经到22:00，必须停止21:00剩余任务，立即切换到22:00轮次；不得让旧任务无限积压。
 - 同时只能运行一轮采集，使用线程锁避免“定时采集”和“立即采集”重叠。
-- GUI必须保持响应，所有网络和数据库重任务放在后台线程，界面更新通过主线程调度。
+- 桌面 GUI 必须保持响应，所有网络和数据库重任务放在工作线程，界面更新通过 Qt 主线程信号调度；Web 请求不得直接执行长时间采集，必须提交到受控后台任务并返回任务状态。
 
 ## 九、SQLite 数据结构
 
@@ -227,12 +233,12 @@ value TEXT NOT NULL
 - 模糊销售额：销量增量 × 当时实际价格，并明确标注“模糊试算，不代表真实成交额”。
 - 所有统计函数都应处理跨日、0点、缺少快照、重复快照和累计值偶发回退。
 
-## 十一、桌面界面总体风格
+## 十一、跨平台界面总体风格
 
-采用简洁、克制、清晰的Windows桌面工具风格：
+采用简洁、克制、清晰的跨平台效率工具风格。桌面端与 Web 端共享信息架构和设计令牌：
 
-- 默认窗口1280×780，最小1050×650。
-- 字体优先 Microsoft YaHei UI。
+- 桌面端默认窗口1280×780，最小1050×650；Web 端支持 1024px 以上完整看板，并为手机和平板提供可用的响应式布局。
+- 字体使用系统字体栈：Windows 优先 Microsoft YaHei UI，macOS 优先 PingFang SC，Web 使用系统 sans-serif 回退。
 - 浅灰白背景，绿色作为主强调色，红色仅用于错误或风险。
 - 表格标题清晰、行高约34、列宽合理，支持横向和纵向滚动。
 - 不做花哨动画，优先信息密度和操作效率。
@@ -240,7 +246,7 @@ value TEXT NOT NULL
 - 右上角显示数据占用、运行状态和下次采集时间。
 - 右上角显示可点击的 `by：冬青`，点击打开：[https://scys.com/personal/3941891?number=201255&tab=posts](https://scys.com/personal/3941891?number=201255&tab=posts)。
 
-**主界面使用横向 Tab，顺序固定为：**
+**桌面端主界面使用横向 Tab；Web 端宽屏使用顶部导航或侧栏，窄屏使用折叠菜单。信息架构顺序固定为：**
 
 1. 竞品看板
 2. 添加商品
@@ -356,7 +362,7 @@ value TEXT NOT NULL
 
 ## 十七、企业微信机器人通知
 
-设置页提供：Webhook输入框、启用复选框、发送测试通知按钮、设置通知店铺按钮、当前状态文字。
+设置页提供：Webhook输入框、启用复选框、发送测试通知按钮、设置通知店铺按钮、当前状态文字。Webhook 值只允许在服务端/桌面本地安全存储，Web API 返回时必须掩码，绝不能下发完整值。
 
 “设置通知店铺”点击后弹出店铺选择窗口，支持全选、取消全选、搜索和保存。只有勾选的店铺发送时报；没有勾选的店铺不通知。
 
@@ -406,7 +412,7 @@ Webhook必须校验格式，发送失败写入日志但不能影响采集数据�
 
 ## 十九、只读 MCP 服务
 
-提供独立 `mcp_server.py`，使用 stdio 通信，只读打开同目录 `monitor.db`。不得提供增删改工具。
+提供独立 `mcp_server.py`，使用 stdio 通信，通过与主程序相同的数据目录解析器只读打开 `monitor.db`。不得提供增删改工具。
 
 **至少提供以下工具：**
 
@@ -423,7 +429,7 @@ Webhook必须校验格式，发送失败写入日志但不能影响采集数据�
 
 **设置页生成的配置话术示例：**
 
-> 请帮我配置一个本地 MCP 服务器，名称设为 `xhs-sales-monitor`。服务器使用 `stdio` 通信，命令路径是：[这里自动填入 `红薯雷达MCP.exe` 或 `mcp_server.py` 绝对路径]。配置完成后请连接并调用 `tools/list` 验证。这个 MCP 用于读取我本机红薯雷达中的小红书店铺、商品、销量、销售额和排名数据；只允许读取，不要修改数据库。
+> 请帮我配置一个本地 MCP 服务器，名称设为 `xhs-sales-monitor`。服务器使用 `stdio` 通信，命令路径是：[这里根据当前平台自动填入 `红薯雷达MCP.exe`、`红薯雷达MCP` 或 `mcp_server.py` 的绝对路径]。配置完成后请连接并调用 `tools/list` 验证。这个 MCP 用于只读访问红薯雷达中的小红书店铺、商品、销量、销售额和排名数据，不允许修改数据库。Web 部署若数据库不在本机，不得伪造本地路径；应明确提示 MCP 需部署在数据库所在主机或使用受认证的只读 API 适配器。
 
 ## 二十、运行日志
 
@@ -457,7 +463,7 @@ Webhook必须校验格式，发送失败写入日志但不能影响采集数据�
 ## 二十二、稳定性和安全要求
 
 - 不在源码中写死个人 Cookie。
-- 浏览器 Profile、Cookie文件和数据库只保存在本机。
+- 桌面版的浏览器 Profile、Cookie 文件和数据库只保存在当前用户的数据目录；Web 版只保存在服务端持久化目录，绝不能发送到浏览器客户端。
 - 日志不要输出 Cookie、Webhook完整值或其他敏感字符串。
 - 所有后台线程异常都要转成用户可读提示。
 - 关闭软件时尽量关闭 Playwright Context 和临时进程。
@@ -466,39 +472,68 @@ Webhook必须校验格式，发送失败写入日志但不能影响采集数据�
 - 任何失败不能让整个 GUI 崩溃。
 - 对长标题、空店铺、无封面、零销量、价格缺失、跨日和夏令时无关的上海时区进行处理。
 
-## 二十三、打包和项目结构
+## 二十三、跨平台构建、部署和项目结构
 
 **建议目录：**
 
 ```text
 red-potato-radar/
 ├─ app.py
-├─ desktop.py
-├─ collector.py
-├─ database.py
-├─ analytics.py
-├─ wecom.py
+├─ core/
+│  ├─ collector.py
+│  ├─ database.py
+│  ├─ analytics.py
+│  ├─ scheduler.py
+│  └─ wecom.py
+├─ desktop/
+│  ├─ main.py
+│  ├─ views/
+│  └─ platform.py
+├─ server/
+│  ├─ main.py
+│  ├─ api/
+│  └─ auth.py
+├─ web/
+│  ├─ src/
+│  ├─ package.json
+│  └─ vite.config.ts
 ├─ mcp_server.py
 ├─ requirements.txt
 ├─ README.md
-├─ build.bat
-├─ 红薯雷达.spec
+├─ build-windows.bat
+├─ build-macos.sh
+├─ Dockerfile
+├─ docker-compose.yml
+├─ .env.example
+├─ packaging/
+│  ├─ windows.spec
+│  └─ macos.spec
+├─ .github/workflows/build.yml
 └─ assets/
    ├─ app-icon.png
-   └─ app-icon.ico
+   ├─ app-icon.ico
+   └─ app-icon.icns
 ```
 
 可根据实现合理合并模块，但功能不能减少。
 
 **打包要求：**
 
-- 主程序输出为 `红薯雷达.exe`。
-- MCP输出为 `红薯雷达MCP.exe`。
-- 两个EXE放在同一文件夹，默认读取同一个 `monitor.db`。
-- 主程序必须 `console=False`，采集时不闪黑框。
-- 打包中包含 Playwright 和必要资源。
-- 如果目标电脑没有Chrome，按“Chrome→Edge→Chromium”的顺序自动寻找。
-- 图标同时应用于窗口、任务栏和EXE文件。
-- 打包结束后检查文件真实存在并给出路径和大小。
+- Windows 输出 `红薯雷达.exe` 与 `红薯雷达MCP.exe`，主程序必须 `console=False`，采集时不闪黑框。
+- macOS 输出 `红薯雷达.app` 与可执行的 `红薯雷达MCP`；说明签名、公证、Apple Silicon 与 Intel 构建边界，未签名产物必须明确标注。
+- 桌面主程序和 MCP 默认解析到同一平台数据目录中的 `monitor.db`，不要依赖当前工作目录或可执行文件所在目录。
+- Web 输出可直接启动的 FastAPI 服务、前端静态产物和容器镜像；数据库、日志与浏览器 Profile 挂载到持久化数据卷。
+- CI 使用 Windows runner 构建 Windows 产物、macOS runner 构建 macOS 产物，并分别运行单元测试和启动冒烟测试；不得把一个系统生成的包冒充另一个系统产物。
+- 打包中包含或在首次运行时以明确步骤安装 Playwright 必要浏览器资源，不得静默下载巨大依赖。
+- 浏览器自动寻找顺序按平台执行；找不到时给出清晰安装指引。
+- 图标同时应用于窗口、任务栏/Dock 和安装包文件。
+- 构建结束后检查产物真实存在，输出路径、大小、目标系统与架构。
 
-> **开始执行：** 现在请开始直接创建完整项目。先检查当前工作目录是否已有文件和用户数据，保留用户现有内容；然后依次完成源码、数据库、GUI、调试和打包。不要中途只向我描述计划，也不要在实现一半时停止。若遇到非关键歧义，请按以上规格做合理决定并继续；只有缺少必须的图标源文件时才允许使用临时图标并注明替换位置。
+## 二十四、跨平台验收标准
+
+- 共享业务层单元测试必须覆盖销量差值、高水位、跨日、迁移、下架、重试与熔断；桌面和 Web 调用同一统计函数并得到相同结果。
+- Windows 与 macOS 分别完成：首次启动、添加商品、立即采集、定时采集、图表、设置保存、通知测试、退出清理和 MCP `tools/list` 冒烟测试。
+- Web 完成：桌面/平板/手机响应式检查，API 健康检查，前端刷新与客户端路由回退，认证保护，WebSocket/SSE 断线重连，以及容器重启后数据仍存在。
+- 任何只在单一平台可用的功能必须通过能力检测显示明确状态；不得因为某平台缺少 Edge、Windows 标志、系统字体或路径格式而崩溃。
+
+> **开始执行：** 现在请开始直接创建完整项目。先检查当前工作目录是否已有文件和用户数据，保留用户现有内容；然后依次完成共享内核、数据库、桌面端、Web 端、测试、调试、构建与部署文件。先在当前操作系统完成可运行验证，再生成其他平台的 CI 构建配置；没有在对应系统真实构建和测试时，必须明确写“待在目标平台验证”，不得声称已经产出或验证。不要中途只向我描述计划，也不要在实现一半时停止。若遇到非关键歧义，请按以上规格做合理决定并继续；只有缺少必须的图标源文件时才允许使用临时图标并注明替换位置。
