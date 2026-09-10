@@ -1,0 +1,12 @@
+services:
+  red-potato-radar:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      RED_POTATO_RADAR_DATA_DIR: /data/red-potato-radar
+    volumes:
+      - radar-data:/data/red-potato-radar
+volumes:
+  radar-data:
