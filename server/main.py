@@ -22,7 +22,9 @@ from core.config import SHANGHAI_TZ, app_paths
 from core.database import Database
 from core.scheduler import BoundaryScheduler
 from core.services import MonitoringService
-from core.wecom import send_markdown, valid_webhook
+from core.feishu import valid_webhook as valid_feishu_webhook
+from core.notify import is_masked, notification_error, resolve_sender, test_message
+from core.wecom import valid_webhook as valid_wecom_webhook
 
 TZ = ZoneInfo(SHANGHAI_TZ)
 WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
@@ -41,16 +43,19 @@ class CollectRequest(BaseModel):
 
 
 class SettingsRequest(BaseModel):
-    values: dict[str, str]
+    values: dict[str, str | None]
 
     @field_validator("values")
     @classmethod
-    def validate_settings(cls, value: dict[str, str]) -> dict[str, str]:
-        if "wecom_webhook" in value and value["wecom_webhook"] and not valid_webhook(value["wecom_webhook"]):
-            raise ValueError("企业微信 Webhook 格式无效")
+    def validate_settings(cls, value: dict[str, str | None]) -> dict[str, str | None]:
+        for key, validator, message in (("wecom_webhook", valid_wecom_webhook, "企业微信 Webhook 格式无效"), ("feishu_webhook", valid_feishu_webhook, "飞书 Webhook 格式无效")):
+            raw = value.get(key)
+            if raw and not is_masked(raw) and not validator(raw): raise ValueError(message)
+        if "notify_channel" in value and value["notify_channel"] not in ("wecom", "feishu"):
+            raise ValueError("notify_channel 必须是 wecom 或 feishu")
         for key in ("interval_min_seconds", "interval_max_seconds"):
-            if key in value and not 0.1 <= float(value[key]) <= 60: raise ValueError(f"{key} 必须在 0.1 到 60 之间")
-        if "collection_period_minutes" in value and not 1 <= int(value["collection_period_minutes"]) <= 1440:
+            if value.get(key) is not None and not 0.1 <= float(value[key]) <= 60: raise ValueError(f"{key} 必须在 0.1 到 60 之间")
+        if value.get("collection_period_minutes") is not None and not 1 <= int(value["collection_period_minutes"]) <= 1440:
             raise ValueError("collection_period_minutes 必须在 1 到 1440 之间")
         return value
 
@@ -184,21 +189,25 @@ async def get_settings() -> dict:
 
 @app.put("/api/settings")
 async def set_settings(request: SettingsRequest) -> dict:
-    for key, value in request.values.items():
-        # A masked webhook from a GET response is never persisted back as the secret.
-        if key == "wecom_webhook" and (value == "已配置" or "…" in value): continue
-        service().db.set_setting(key, value)
+    db = service().db
+    updates = {key: value for key, value in request.values.items() if value is not None and not (key in ("wecom_webhook", "feishu_webhook") and is_masked(value))}
+    # A masked webhook from a GET response is never persisted back as the secret.
+    merged = {**db.settings(), **updates}
+    error = notification_error(merged)
+    if error: raise HTTPException(422, error)
+    for key, value in updates.items(): db.set_setting(key, value)
     return service().settings_public()
 
 
-@app.post("/api/settings/test-wecom")
-async def test_wecom() -> dict:
-    webhook = service().db.get_setting("wecom_webhook")
-    if not webhook: raise HTTPException(400, "尚未配置企业微信 Webhook")
+@app.post("/api/settings/test-notify")
+async def test_notify() -> dict:
+    resolved = resolve_sender(service().db.settings())
+    if not resolved: raise HTTPException(400, "尚未启用通知或所选渠道未配置 Webhook")
+    channel, webhook, sender = resolved
     try:
-        await send_markdown(webhook, "✅ 红薯雷达企业微信通知测试成功")
+        await sender(webhook, test_message(channel))
     except Exception as exc:
-        service().db.log("error", "wecom", "测试通知失败", detail=repr(exc))
+        service().db.log("error", channel, "测试通知失败", detail=repr(exc))
         raise HTTPException(502, "发送失败，详情已写入运行日志") from exc
     return {"ok": True}
 

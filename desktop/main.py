@@ -10,9 +10,9 @@ from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QAction, QDesktopServices
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit, QScrollArea,
-    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QRadioButton,
+    QPlainTextEdit, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 from PySide6.QtCore import QUrl
 
 from core.collector import ProductCollector
@@ -115,9 +115,18 @@ class MainWindow(QMainWindow):
         content = QWidget(); form = QFormLayout(content)
         self.period = QSpinBox(); self.period.setRange(1, 1440); self.period.setValue(int(self.db.get_setting("collection_period_minutes", "60"))); self.period.setSuffix(" 分钟")
         self.min_delay = QLineEdit(self.db.get_setting("interval_min_seconds", "0.1")); self.max_delay = QLineEdit(self.db.get_setting("interval_max_seconds", "0.3"))
-        self.webhook = QLineEdit(self.service.settings_public().get("wecom_webhook") or ""); self.enabled = QCheckBox("启用企业微信通知"); self.enabled.setChecked(self.db.get_setting("wecom_enabled") == "true")
-        form.addRow("采集周期", self.period); form.addRow("商品间隔最小秒数", self.min_delay); form.addRow("商品间隔最大秒数", self.max_delay); form.addRow("企业微信 Webhook", self.webhook); form.addRow("通知", self.enabled)
-        save = QPushButton("保存设置"); save.clicked.connect(self.save_settings); test = QPushButton("发送测试通知"); test.clicked.connect(self.test_wecom); form.addRow(save, test)
+        public = self.service.settings_public()
+        self.wecom_webhook = QLineEdit(public.get("wecom_webhook") or ""); self.feishu_webhook = QLineEdit(public.get("feishu_webhook") or "")
+        self.channel_group = QButtonGroup(content)
+        self.channel_wecom = QRadioButton("企业微信"); self.channel_feishu = QRadioButton("飞书")
+        self.channel_group.addButton(self.channel_wecom); self.channel_group.addButton(self.channel_feishu)
+        feishu_selected = self.db.get_setting("notify_channel") == "feishu"
+        self.channel_feishu.setChecked(feishu_selected); self.channel_wecom.setChecked(not feishu_selected)
+        channels = QWidget(); channels_box = QHBoxLayout(channels); channels_box.setContentsMargins(0, 0, 0, 0)
+        channels_box.addWidget(self.channel_wecom); channels_box.addWidget(self.channel_feishu); channels_box.addStretch()
+        self.enabled = QCheckBox("启用通知"); self.enabled.setChecked(self.db.get_setting("notify_enabled", self.db.get_setting("wecom_enabled")) == "true")
+        form.addRow("采集周期", self.period); form.addRow("商品间隔最小秒数", self.min_delay); form.addRow("商品间隔最大秒数", self.max_delay); form.addRow("通知渠道（二选一）", channels); form.addRow("企业微信 Webhook", self.wecom_webhook); form.addRow("飞书 Webhook", self.feishu_webhook); form.addRow("通知", self.enabled)
+        save = QPushButton("保存设置"); save.clicked.connect(self.save_settings); test = QPushButton("发送测试通知"); test.clicked.connect(self.test_notify); form.addRow(save, test)
         form.addRow(QLabel("MCP 只读：使用 mcp_server.py 或打包后的 红薯雷达MCP，和本程序读取同一个数据目录中的 monitor.db。"))
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content); return scroll
 
@@ -194,18 +203,23 @@ class MainWindow(QMainWindow):
         usage = self.db.data_usage(); self.usage.setText(f"数据占用：{usage['bytes'] / 1024 / 1024:.1f}MB · {usage['snapshots']:,}条")
 
     def save_settings(self) -> None:
+        from core.notify import is_masked, notification_error
         try:
-            values = {"collection_period_minutes": str(self.period.value()), "interval_min_seconds": str(float(self.min_delay.text())), "interval_max_seconds": str(float(self.max_delay.text())), "wecom_enabled": str(self.enabled.isChecked()).lower()}
-            if self.webhook.text() and "…" not in self.webhook.text() and self.webhook.text() != "已配置": values["wecom_webhook"] = self.webhook.text()
+            values = {"collection_period_minutes": str(self.period.value()), "interval_min_seconds": str(float(self.min_delay.text())), "interval_max_seconds": str(float(self.max_delay.text())), "notify_channel": "feishu" if self.channel_feishu.isChecked() else "wecom", "notify_enabled": str(self.enabled.isChecked()).lower()}
+            for field, key in ((self.wecom_webhook, "wecom_webhook"), (self.feishu_webhook, "feishu_webhook")):
+                if field.text() and not is_masked(field.text()): values[key] = field.text()
+            error = notification_error({**self.db.settings(), **values})
+            if error: QMessageBox.warning(self, "设置", error); return
             for key, value in values.items(): self.db.set_setting(key, value)
             QMessageBox.information(self, "设置", "设置已保存")
         except ValueError: QMessageBox.warning(self, "设置", "间隔必须是有效数字")
 
-    def test_wecom(self) -> None:
-        from core.wecom import send_markdown
-        webhook = self.db.get_setting("wecom_webhook")
-        if not webhook: QMessageBox.warning(self, "通知", "请先配置 Webhook"); return
-        self.run_worker(lambda: send_markdown(webhook, "✅ 红薯雷达企业微信通知测试成功"), lambda _: QMessageBox.information(self, "通知", "测试发送成功"))
+    def test_notify(self) -> None:
+        from core.notify import resolve_sender, test_message
+        resolved = resolve_sender(self.db.settings())
+        if not resolved: QMessageBox.warning(self, "通知", "请先启用通知并配置所选渠道的 Webhook"); return
+        channel, webhook, sender = resolved
+        self.run_worker(lambda: sender(webhook, test_message(channel)), lambda _: QMessageBox.information(self, "通知", "测试发送成功"))
 
     def clear_logs(self) -> None:
         if QMessageBox.question(self, "确认", "确定清空全部运行日志？") == QMessageBox.StandardButton.Yes: self.db.clear_logs(); self.refresh_logs()

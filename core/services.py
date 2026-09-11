@@ -10,7 +10,7 @@ from .collector import ProductCollector, extract_product_id
 from .config import SHANGHAI_TZ
 from .database import Database
 from .models import CollectionResult, CollectionState, Snapshot
-from .wecom import mask_webhook, send_markdown
+from .notify import CHANNEL_LABELS, mask_webhook, resolve_sender
 
 TZ = ZoneInfo(SHANGHAI_TZ)
 SALES_LIMIT = 10_000
@@ -125,8 +125,9 @@ class MonitoringService:
 
     async def _notify_if_enabled(self, at: datetime, failures: list[dict[str, Any]]) -> None:
         settings = self.db.settings()
-        webhook = settings.get("wecom_webhook")
-        if settings.get("wecom_enabled") != "true" or not webhook: return
+        resolved = resolve_sender(settings)
+        if not resolved: return
+        channel, webhook, sender = resolved
         selected = set(filter(None, settings.get("wecom_shop_ids", "").split(",")))
         shops = [s for s in self.shops() if str(s.get("shop_id")) in selected]
         if not shops: return
@@ -137,17 +138,18 @@ class MonitoringService:
         for index, shop in enumerate(ranking):
             lines.extend(["", f"{medals[index] if index < 3 else str(index + 1) + '.'} {shop['shop_name']}", f"上小时销量：{shop['last_hour_sales'] if shop['last_hour_sales'] is not None else '—'} 单", f"今日总销量：{shop['today_sales'] if shop['today_sales'] is not None else '—'} 单"])
         try:
-            await send_markdown(webhook, "\n".join(lines))
+            await sender(webhook, "\n".join(lines))
             if failures:
                 failure_lines = [f"⚠️ {at:%m月%d日 %H:%M} 采集失败 {len(failures)} 个"]
                 failure_lines += [f"{f['product']['title']}\n{f['product']['id']}\n{f['result'].method}：{f['result'].reason}" for f in failures]
-                await send_markdown(webhook, "\n\n".join(failure_lines))
+                await sender(webhook, "\n\n".join(failure_lines))
         except Exception as exc:
-            self.db.log("error", "wecom", "企业微信通知发送失败", detail=repr(exc))
+            self.db.log("error", channel, f"{CHANNEL_LABELS[channel]}通知发送失败", detail=repr(exc))
 
     def settings_public(self) -> dict[str, str | None]:
         settings = self.db.settings()
-        return {**{k: v for k, v in settings.items() if k != "wecom_webhook"}, "wecom_webhook": mask_webhook(settings.get("wecom_webhook"))}
+        masked = {key: mask_webhook(settings.get(key)) for key in ("wecom_webhook", "feishu_webhook")}
+        return {**{k: v for k, v in settings.items() if k not in masked}, **masked}
 
     def smart_duplicates(self) -> list[list[dict[str, Any]]]:
         grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}

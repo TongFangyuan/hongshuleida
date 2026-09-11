@@ -55,7 +55,7 @@ Vite 默认会把 `/api` 请求交给同源服务；生产模式请先执行 `cd
 - SQLite 数据库为 `monitor.db`，启用 WAL、事务、参数化 SQL 和自动字段迁移。Web/Docker 必须将此目录挂载为持久化卷。
 - 默认 Web 仅应监听 `127.0.0.1`。如需对局域网/公网开放，必须放到 HTTPS 反向代理后，设置严格的 `RED_POTATO_RADAR_ALLOWED_ORIGINS`，并在代理层使用身份认证及 CSRF 策略；不要暴露浏览器 Profile、数据库路径或 Webhook。
 - 设置 `RED_POTATO_RADAR_API_TOKEN` 后，除 `/api/health` 外的 API 必须携带 `Authorization: Bearer <token>`；浏览器端应由可信反向代理注入认证信息，避免把 token 编译进静态前端。
-- 企业微信 Webhook 只存于服务端/当前用户 SQLite；GET API 仅返回掩码。日志不会写入完整 Webhook 或 Cookie。
+- 通知渠道（企业微信或飞书机器人 Webhook，二选一）只存于服务端/当前用户 SQLite；GET API 仅返回掩码。日志不会写入完整 Webhook 或 Cookie。
 
 ## Docker 部署
 
