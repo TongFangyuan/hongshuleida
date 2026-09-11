@@ -156,7 +156,11 @@ async def collect(request: CollectRequest, background: BackgroundTasks) -> dict:
 
 @app.get("/api/collect/status")
 async def collect_status() -> dict:
-    return {"running": service()._lock.locked(), "last_run": service().last_run}
+    scheduler = getattr(app.state, "scheduler", None)
+    return {"running": service()._lock.locked(), "last_run": service().last_run,
+            "scheduled": scheduler.running if scheduler else False,
+            "period_minutes": scheduler.period_minutes if scheduler else None,
+            "next_run_at": scheduler.next_run_at.isoformat() if scheduler and scheduler.next_run_at else None}
 
 
 @app.get("/api/shops")
@@ -196,6 +200,11 @@ async def set_settings(request: SettingsRequest) -> dict:
     error = notification_error(merged)
     if error: raise HTTPException(422, error)
     for key, value in updates.items(): db.set_setting(key, value)
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler:
+        scheduler.reconfigure(int(merged.get("collection_period_minutes") or 60))
+        if merged.get("monitoring_enabled") == "true": scheduler.start()
+        else: await scheduler.stop()
     return service().settings_public()
 
 

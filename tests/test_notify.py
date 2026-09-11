@@ -146,3 +146,32 @@ def test_settings_api_null_values_and_channel_requirement(tmp_path: Path, monkey
         assert client.put("/api/settings", json={"values": {"notify_enabled": "false", "notify_channel": "feishu", "feishu_webhook": "", "wecom_webhook": ""}}).status_code == 200
         # Null numeric fields are skipped instead of crashing the validator.
         assert client.put("/api/settings", json={"values": {"interval_min_seconds": None, "notify_channel": "wecom", "wecom_webhook": WECOM_HOOK, "notify_enabled": "true"}}).status_code == 200
+
+
+def test_settings_api_controls_scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    monkeypatch.setenv("RED_POTATO_RADAR_DATA_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from server.main import app
+
+    with TestClient(app) as client:
+        scheduler = app.state.scheduler
+        assert not scheduler.running
+        status = client.get("/api/collect/status").json()
+        assert status["scheduled"] is False and status["period_minutes"] == 60 and status["next_run_at"] is None
+
+        assert client.put("/api/settings", json={"values": {"monitoring_enabled": "true", "collection_period_minutes": "30"}}).status_code == 200
+        assert scheduler.running and scheduler.period_minutes == 30
+        for _ in range(50):
+            status = client.get("/api/collect/status").json()
+            if status["next_run_at"]: break
+            time.sleep(0.01)
+        assert status["scheduled"] is True and status["period_minutes"] == 30 and status["next_run_at"]
+
+        assert client.put("/api/settings", json={"values": {"collection_period_minutes": "15"}}).status_code == 200
+        assert scheduler.running and scheduler.period_minutes == 15
+
+        assert client.put("/api/settings", json={"values": {"monitoring_enabled": "false"}}).status_code == 200
+        assert not scheduler.running
+        assert client.get("/api/collect/status").json()["scheduled"] is False
