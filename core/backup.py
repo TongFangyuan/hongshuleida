@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -39,21 +40,22 @@ class BackupService:
 
     @staticmethod
     def _verify(path: Path) -> None:
-        with sqlite3.connect(path, timeout=10) as conn:
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
             result = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if result != "ok":
             raise RuntimeError(f"备份完整性校验失败：{result}")
 
     @staticmethod
     def _copy_database(source_path: Path, target_path: Path) -> None:
-        with sqlite3.connect(source_path, timeout=10) as source, sqlite3.connect(target_path, timeout=10) as target:
+        with closing(sqlite3.connect(source_path, timeout=10)) as source, closing(sqlite3.connect(target_path, timeout=10)) as target:
             source.execute("PRAGMA busy_timeout=10000")
             source.backup(target)
+            target.commit()
 
     @staticmethod
     def _finalize_standalone(path: Path) -> None:
         """Make a portable .db that does not depend on a sidecar WAL file."""
-        with sqlite3.connect(path, timeout=10) as conn:
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("PRAGMA journal_mode=DELETE")
         Path(f"{path}-wal").unlink(missing_ok=True)
@@ -61,7 +63,7 @@ class BackupService:
 
     @staticmethod
     def _sanitize_sensitive_data(path: Path) -> None:
-        with sqlite3.connect(path, timeout=10) as conn:
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "settings" in tables:
                 secrets = [row[0] for row in conn.execute("SELECT value FROM settings WHERE key IN (?, ?)", SENSITIVE_SETTING_KEYS)]
@@ -109,7 +111,7 @@ class BackupService:
             if source.read(len(SQLITE_HEADER)) != SQLITE_HEADER:
                 raise RuntimeError("导入文件不是有效的 SQLite 数据库")
         try:
-            with sqlite3.connect(path, timeout=10) as conn:
+            with closing(sqlite3.connect(path, timeout=10)) as conn:
                 integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
                 if integrity != "ok":
                     raise RuntimeError(f"导入文件完整性校验失败：{integrity}")
@@ -129,7 +131,7 @@ class BackupService:
         }
 
     def _copy_external_data(self, source_path: Path, target: Database) -> None:
-        with sqlite3.connect(source_path, timeout=10) as source:
+        with closing(sqlite3.connect(source_path, timeout=10)) as source:
             source.row_factory = sqlite3.Row
             source_tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             now = datetime.now(TZ).isoformat(timespec="seconds")
@@ -257,8 +259,9 @@ class BackupService:
         rollback = self.db.path.with_suffix(".restore.rollback.tmp")
         replaced = False
         try:
-            with sqlite3.connect(source, timeout=10) as backup, sqlite3.connect(temporary, timeout=10) as target:
+            with closing(sqlite3.connect(source, timeout=10)) as backup, closing(sqlite3.connect(temporary, timeout=10)) as target:
                 backup.backup(target)
+                target.commit()
             self._finalize_standalone(temporary)
             self._verify(temporary)
             # Private rollback copy is never exposed as a downloadable backup.
@@ -267,7 +270,7 @@ class BackupService:
             self._verify(rollback)
             # A truncated WAL makes the old main database self-contained before replacement.
             # If the process stops here, either the old or new complete database remains usable.
-            with sqlite3.connect(self.db.path, timeout=10) as current:
+            with closing(sqlite3.connect(self.db.path, timeout=10)) as current:
                 current.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             Path(f"{self.db.path}-wal").unlink(missing_ok=True)
             Path(f"{self.db.path}-shm").unlink(missing_ok=True)

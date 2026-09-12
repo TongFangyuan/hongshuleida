@@ -21,6 +21,8 @@ def test_online_backup_retention_and_restore(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("SELECT value FROM settings WHERE key='wecom_webhook'").fetchone() is None
     assert b"key=secret" not in Path(first["file_path"]).read_bytes()
+    assert not Path(f"{first['file_path']}-wal").exists()
+    assert not Path(f"{first['file_path']}-shm").exists()
 
     db.set_setting("restore_marker", "after")
     second = backups.create("daily")
