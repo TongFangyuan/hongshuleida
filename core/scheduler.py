@@ -72,3 +72,8 @@ class BoundaryScheduler:
             self._task.cancel()
             with suppress(asyncio.CancelledError): await self._task
         self._task = None
+
+    async def wait_for_jobs(self) -> None:
+        """Wait for jobs already launched before a maintenance operation."""
+        if self._jobs:
+            await asyncio.gather(*tuple(self._jobs), return_exceptions=True)

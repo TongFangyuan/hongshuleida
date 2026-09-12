@@ -38,10 +38,20 @@ class AppPaths:
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
 
+    @property
+    def backups(self) -> Path:
+        return self.data_dir / "backups"
+
+    @property
+    def backup_imports(self) -> Path:
+        return self.data_dir / "backup-imports"
+
     def ensure(self) -> "AppPaths":
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.browser_profile.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.backups.mkdir(parents=True, exist_ok=True)
+        self.backup_imports.mkdir(parents=True, exist_ok=True)
         return self
 
 

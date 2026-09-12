@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from core.database import Database
 from core import notify
 from core.feishu import send_text, valid_webhook
+from core.models import CollectionResult, CollectionState, ProductData, Snapshot
 from core.notify import is_masked, mask_webhook, resolve_sender
 from core.services import MonitoringService
 from core.wecom import send_markdown
@@ -83,6 +84,89 @@ def test_notify_routes_to_selected_channel(tmp_path: Path, monkeypatch: pytest.M
     asyncio.run(service._notify_if_enabled(datetime.now(TZ), []))
     assert len(sent) == 2 and sent[1][0] == WECOM_HOOK
     assert service.settings_public()["feishu_webhook"] == mask_webhook(FEISHU_HOOK)
+
+
+def test_feishu_report_is_sorted_for_the_previous_complete_hour(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = Database(tmp_path / "monitor.db")
+    service = MonitoringService(db, None)
+    products = [
+        {"id": "a" * 24, "title": "甲商品", "shop_name": "甲店", "shop_id": "shop-a", "cover": None, "sold": 10, "shop_sold": None, "price": 9.9, "fans": None, "stock_status": None, "deliverable": None},
+        {"id": "b" * 24, "title": "乙商品", "shop_name": "乙店", "shop_id": "shop-b", "cover": None, "sold": 20, "shop_sold": None, "price": 19.9, "fans": None, "stock_status": None, "deliverable": None},
+    ]
+    service.confirm_products(products)
+    report_boundary = datetime(2026, 9, 6, 13, tzinfo=TZ)
+    for product, baseline, finish in zip(products, (10, 20), (14, 29)):
+        db.save_snapshot(Snapshot(product["id"], report_boundary.replace(hour=12), baseline, None, product["price"], None, None, None))
+        db.save_snapshot(Snapshot(product["id"], report_boundary, finish, None, product["price"], None, None, None))
+    for key, value in (("notify_enabled", "true"), ("notify_channel", "feishu"), ("feishu_webhook", FEISHU_HOOK), ("wecom_shop_ids", "shop-a,shop-b")):
+        db.set_setting(key, value)
+    sent: list[str] = []
+
+    async def fake_send(_: str, text: str) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr("core.feishu.send_text", fake_send)
+    asyncio.run(service._notify_if_enabled(report_boundary, []))
+
+    assert len(sent) == 1
+    assert "📊 12点店铺销量时报\n09月06日 12:00 - 12:59" in sent[0]
+    assert sent[0].index("乙店") < sent[0].index("甲店")
+    assert "上小时销量：9 单" in sent[0] and "上小时销量：4 单" in sent[0]
+
+
+def test_no_selected_shops_is_logged_without_sending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = Database(tmp_path / "monitor.db")
+    service = MonitoringService(db, None)
+    db.set_setting("notify_enabled", "true")
+    db.set_setting("notify_channel", "feishu")
+    db.set_setting("feishu_webhook", FEISHU_HOOK)
+
+    async def unexpected_send(_: str, __: str) -> None:
+        raise AssertionError("通知店铺为空时不应发送")
+
+    monkeypatch.setattr("core.feishu.send_text", unexpected_send)
+    asyncio.run(service._notify_if_enabled(datetime(2026, 9, 6, 13, tzinfo=TZ), []))
+
+    assert any("未设置通知店铺" in row["message"] for row in db.logs(source="feishu"))
+
+
+def test_manual_collection_does_not_send_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Collector:
+        async def collect(self, product_id: str) -> CollectionResult:
+            return CollectionResult(CollectionState.SUCCESS, ProductData(product_id, "商品", "店铺", "shop1", None, 6, None, 9.9, None, None, None))
+
+        async def pause(self) -> None:
+            return None
+
+    db = Database(tmp_path / "monitor.db")
+    service = MonitoringService(db, Collector())
+    service.confirm_products([{"id": "a" * 24, "title": "商品", "shop_name": "店铺", "shop_id": "shop1", "cover": None, "sold": 5, "shop_sold": None, "price": 9.9, "fans": None, "stock_status": None, "deliverable": None}])
+    calls: list[datetime] = []
+
+    async def record(boundary: datetime, _: list[dict]) -> None:
+        calls.append(boundary)
+
+    monkeypatch.setattr(service, "_notify_if_enabled", record)
+    asyncio.run(service.collect_products())
+    assert calls == []
+    formal_time = datetime(2026, 9, 6, 13, tzinfo=TZ)
+    asyncio.run(service.collect_products(formal_time=formal_time))
+    assert calls == [formal_time]
+
+
+def test_notification_shops_api_persists_selection_independently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RED_POTATO_RADAR_DATA_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from server.main import app
+
+    product = {"id": "a" * 24, "title": "商品", "shop_name": "店铺", "shop_id": "shop1", "cover": None, "sold": 5, "shop_sold": None, "price": 9.9, "fans": None, "stock_status": None, "deliverable": None}
+    with TestClient(app) as client:
+        app.state.service.confirm_products([product])
+        assert client.get("/api/notification-shops").json()["selected_shop_ids"] == []
+        assert client.put("/api/notification-shops", json={"shop_ids": ["shop1"]}).json()["selected_shop_ids"] == ["shop1"]
+        # The generic settings form must not overwrite a selection saved by its dedicated control.
+        assert client.put("/api/settings", json={"values": {"wecom_shop_ids": ""}}).status_code == 200
+        assert app.state.db.get_setting("wecom_shop_ids") == "shop1"
 
 
 def test_settings_api_validation_masking_and_test_notify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

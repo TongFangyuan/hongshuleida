@@ -67,6 +67,13 @@ class Database:
         );
         CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(created_at DESC);
         CREATE TABLE IF NOT EXISTS deleted_products (product_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS backup_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, file_name TEXT NOT NULL, file_path TEXT NOT NULL,
+          created_at TEXT NOT NULL, trigger_type TEXT NOT NULL, file_size INTEGER,
+          status TEXT NOT NULL, error_detail TEXT, restored_at TEXT, deleted_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_backup_records_created_at ON backup_records(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_backup_records_status ON backup_records(status);
         """
         with self.transaction() as conn:
             conn.executescript(schema)
@@ -172,12 +179,48 @@ class Database:
             conn.execute("INSERT INTO logs(created_at,level,source,product_id,product_title,message,detail) VALUES(?,?,?,?,?,?,?)",
                          (self._now(), level, source, product_id, product_title, message, detail))
 
-    def logs(self, level: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    def logs(self, level: str | None = None, limit: int = 500, source: str | None = None) -> list[dict[str, Any]]:
         sql, args = "SELECT * FROM logs", []
-        if level: sql += " WHERE level=?"; args.append(level)
+        clauses = []
+        if level: clauses.append("level=?"); args.append(level)
+        if source: clauses.append("source=?"); args.append(source)
+        if clauses: sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"; args.append(min(max(limit, 1), 2000))
         with self._connect(readonly=True) as conn:
             return [dict(row) for row in conn.execute(sql, args)]
+
+    def add_backup_record(self, file_name: str, file_path: str, trigger_type: str, status: str,
+                          file_size: int | None = None, error_detail: str | None = None) -> dict[str, Any]:
+        with self.transaction() as conn:
+            cursor = conn.execute("""INSERT INTO backup_records
+                (file_name,file_path,created_at,trigger_type,file_size,status,error_detail)
+                VALUES(?,?,?,?,?,?,?)""",
+                (file_name, file_path, self._now(), trigger_type, file_size, status, error_detail))
+            row = conn.execute("SELECT * FROM backup_records WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return dict(row)
+
+    def backup_records(self, include_deleted: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM backup_records" + ("" if include_deleted else " WHERE deleted_at IS NULL") + " ORDER BY id DESC"
+        with self._connect(readonly=True) as conn:
+            return [dict(row) for row in conn.execute(sql)]
+
+    def backup_record(self, record_id: int) -> dict[str, Any] | None:
+        with self._connect(readonly=True) as conn:
+            row = conn.execute("SELECT * FROM backup_records WHERE id=?", (record_id,)).fetchone()
+        return dict(row) if row else None
+
+    def backup_record_by_path(self, file_path: str) -> dict[str, Any] | None:
+        with self._connect(readonly=True) as conn:
+            row = conn.execute("SELECT * FROM backup_records WHERE file_path=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1", (file_path,)).fetchone()
+        return dict(row) if row else None
+
+    def mark_backup_deleted(self, record_id: int) -> None:
+        with self.transaction() as conn:
+            conn.execute("UPDATE backup_records SET status='deleted', deleted_at=? WHERE id=?", (self._now(), record_id))
+
+    def mark_backup_restored(self, record_id: int) -> None:
+        with self.transaction() as conn:
+            conn.execute("UPDATE backup_records SET restored_at=? WHERE id=?", (self._now(), record_id))
 
     def clear_logs(self) -> int:
         with self.transaction() as conn:

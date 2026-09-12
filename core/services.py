@@ -34,9 +34,9 @@ class MonitoringService:
             rows.append({**product, **metrics, "status": "异常" if product.get("last_error") else ("待采集" if metrics["cumulative_sold"] is None else "正常")})
         return sorted(rows, key=lambda r: (r["today_sales"] is None, -(r["today_sales"] or 0), r["title"]))
 
-    def shops(self) -> list[dict[str, Any]]:
+    def shops(self, now: datetime | None = None) -> list[dict[str, Any]]:
         products = self.db.products()
-        return sorted(shop_metrics(products, self.db.all_snapshots([p["id"] for p in products])), key=lambda r: -(r["today_sales"] or 0))
+        return sorted(shop_metrics(products, self.db.all_snapshots([p["id"] for p in products]), now), key=lambda r: -(r["today_sales"] or 0))
 
     def overview(self) -> dict[str, Any]:
         rows, shops = self.dashboard(), self.shops()
@@ -100,7 +100,8 @@ class MonitoringService:
                     if action == "success": failures.remove(failed); counts["success"] += 1
             status = {"state": "cooldown" if restricted >= 3 else "done", "started_at": started.isoformat(), "finished_at": datetime.now(TZ).isoformat(), "counts": counts, "failures": len(failures), "cooldown_until": (datetime.now(TZ) + timedelta(minutes=15)).isoformat() if restricted >= 3 else None}
             self.last_run = status
-            await self._notify_if_enabled(formal_time or started, failures)
+            if formal_time is not None:
+                await self._notify_if_enabled(formal_time, failures)
             return status
 
     def _apply_result(self, product: dict[str, Any], result: CollectionResult, captured_at: datetime) -> str:
@@ -129,16 +130,23 @@ class MonitoringService:
         if not resolved: return
         channel, webhook, sender = resolved
         selected = set(filter(None, settings.get("wecom_shop_ids", "").split(",")))
-        shops = [s for s in self.shops() if str(s.get("shop_id")) in selected]
-        if not shops: return
+        if not selected:
+            self.db.log("info", channel, "店铺销量时报未发送：未设置通知店铺")
+            return
+        shops = [s for s in self.shops(at) if str(s.get("shop_id")) in selected]
+        if not shops:
+            self.db.log("warning", channel, "店铺销量时报未发送：所选店铺当前没有监控商品")
+            return
         ranking = sorted(shops, key=lambda s: -(s["last_hour_sales"] or 0))
-        label = at.astimezone(TZ).strftime("%H点店铺销量时报\n%m月%d日 %H:00 - %H:59")
+        report_hour = at.astimezone(TZ).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        label = report_hour.strftime("%H点店铺销量时报\n%m月%d日 %H:00 - %H:59")
         lines = ["📊 " + label]
         medals = ["🥇", "🥈", "🥉"]
         for index, shop in enumerate(ranking):
             lines.extend(["", f"{medals[index] if index < 3 else str(index + 1) + '.'} {shop['shop_name']}", f"上小时销量：{shop['last_hour_sales'] if shop['last_hour_sales'] is not None else '—'} 单", f"今日总销量：{shop['today_sales'] if shop['today_sales'] is not None else '—'} 单"])
         try:
             await sender(webhook, "\n".join(lines))
+            self.db.log("success", channel, "店铺销量时报发送成功", detail=f"店铺数：{len(ranking)}")
             if failures:
                 failure_lines = [f"⚠️ {at:%m月%d日 %H:%M} 采集失败 {len(failures)} 个"]
                 failure_lines += [f"{f['product']['title']}\n{f['product']['id']}\n{f['result'].method}：{f['result'].reason}" for f in failures]
