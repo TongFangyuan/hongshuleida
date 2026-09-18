@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+node_modules/
+web/dist/
+dist/
+build/
+*.egg-info/
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+.env
+monitor.db
+monitor.db-*
